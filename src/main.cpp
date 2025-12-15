@@ -244,13 +244,13 @@ PumpController pumpController(10); // Максимум 10 насосов
 
 void setup() {
   // Инициализация последовательного порта
-  Serial.begin(9600);
+  Serial.begin(57600 );
   
   // Добавление насосов в контроллер
-  pumpController.addPump(SoilSensor(A0, 480, 444000), 4, 44000);  // Насос 1
-  pumpController.addPump(SoilSensor(A1, 280, 555000), 5, 55000);   // Насос 2
-  pumpController.addPump(SoilSensor(A4, 999, 666000), 6, 66000);  // Насос 3
-  pumpController.addPump(SoilSensor(A3, 260, 777000), 7 , 77000);  // Насос 4
+  pumpController.addPump(SoilSensor(A0, 400, 44000), 4, 44000);  // Насос 1
+  pumpController.addPump(SoilSensor(A1, 7, 15000), 5, 25000);   // Насос 2
+  pumpController.addPump(SoilSensor(A2, 250, 666000), 6, 66000);  // Насос 3
+  pumpController.addPump(SoilSensor(A3, 3000, 7777000), 7 , 77000);  // Насос 4
   
   // Инициализация контроллера
   pumpController.setup();

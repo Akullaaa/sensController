@@ -1,9 +1,10 @@
 {
 	"folders": [
 		{
-			"name": "sensController",
 			"path": ".."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"terminal.integrated.defaultProfile.osx": null
+	}
 }
