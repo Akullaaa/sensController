@@ -1,262 +1,253 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SD.h>
+#include <SPI.h>
 
-// Структура для статистики выполнения
-struct ProcessStats {
-  unsigned long callCount = 0;
-  unsigned long totalTime = 0;
-  unsigned long minTime = 0xFFFFFFFF; // Максимальное значение unsigned long
-  unsigned long maxTime = 0;
-  
-  // Метод для обновления статистики
-  void update(unsigned long executionTime) {
-    callCount++;
-    totalTime += executionTime;
-    if (executionTime < minTime) minTime = executionTime;
-    if (executionTime > maxTime) maxTime = executionTime;
-  }
-  
-  // Метод для вычисления среднего времени
-  unsigned long getAverageTime() const {
-    return callCount > 0 ? totalTime / callCount : 0;
-  }
-  
-  // Метод для формирования строки со статистикой
-  String getStatsString() const {
-    return "(" + String(callCount) + 
-           ") " + String(minTime) + 
-           "/" + String(maxTime) + 
-           "/" + String(getAverageTime());
-  }
-};
+#include "ProcessStats.h"
+#include "Helpers.h"
+#include "SDLogger.h"
+#include "SoilSensor.h"
+#include "Pump.h"
+#include "PumpController.h"
 
-// Функция для получения свободной оперативной памяти
-int getFreeMemory() {
-  extern int __heap_start, *__brkval;
-  int v;
-  return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval);
-}
+// Инициализация LCD дисплея (адрес 0x27, 20 символов, 4 строки)
+LiquidCrystal_I2C lcd(0x27, 20, 4);
 
 // Глобальная статистика для всех насосов
 ProcessStats globalProcessStats;
 
-// Класс для датчика сухости
-class SoilSensor {
-private:
-  int soilPin;              // Пин датчика сухости
-  int dryThreshold;         // Порог сухости
-  unsigned long checkInterval; // Интервал проверки
-  unsigned long lastCheckTime; // Время последней проверки
-  int lastMoistureValue;    // Последнее измеренное значение сухости
+// Глобальный объект логгера
+SDLogger logger;
 
-public:
-  // Конструктор
-  SoilSensor(int soilPin, int dryThreshold, unsigned long checkInterval)
-    : soilPin(soilPin), dryThreshold(dryThreshold), checkInterval(checkInterval), lastCheckTime(0), lastMoistureValue(0) {
-      // Инициализируем lastMoistureValue сразу при создании объекта
-      pinMode(soilPin, INPUT); // Важно настроить пин как вход
-      lastMoistureValue = readMoisture();
+// Объявление контроллера насосов (определён ниже)
+extern PumpController pumpController;
+
+// Имя файла конфигурации на SD
+const char* CONFIG_FILE = "config.txt";
+
+// Прототипы функций конфигурации
+void saveConfig();
+void loadConfig();
+
+// Функция для унифицированного логирования (Serial + SD)
+void logMessage(const __FlashStringHelper* msg) {
+  Serial.println(msg);
+  logger.writeLog(msg);
+}
+
+void logMessage(const String& msg) {
+  Serial.println(msg);
+  // Для String конвертируем в константное сообщение для логгера
+  if (logger.isInit()) {
+    File f = SD.open("log.txt", FILE_WRITE);
+    if (f) {
+      unsigned long t = millis() / 1000;
+      f.print('[');
+      f.print(t / 3600);
+      f.print(':');
+      if ((t % 3600) / 60 < 10) f.print('0');
+      f.print((t % 3600) / 60);
+      f.print(':');
+      if (t % 60 < 10) f.print('0');
+      f.print(t % 60);
+      f.print("] ");
+      f.println(msg);
+      f.close();
     }
-
-  // Метод для проверки, пришло ли время для следующей проверки
-  bool isCheckTime() {
-    return millis() - lastCheckTime >= checkInterval;
   }
+}
 
-  // Метод для чтения сухости
-  int readMoisture() {
-    // Обновляем время последней проверки
-    lastCheckTime = millis();
-    lastMoistureValue = analogRead(soilPin); // Сохраняем последнее значение
-    //Serial.println("ч=: " + String(lastMoistureValue));
-    return lastMoistureValue;
+// Сохранение конфигурации (пороги и интервалы) на SD
+void saveConfig() {
+  SD.remove(CONFIG_FILE);
+  File f = SD.open(CONFIG_FILE, FILE_WRITE);
+  if (!f) {
+    logMessage(F("ERR: CFG open W"));
+    return;
   }
-
-  // Метод для проверки необходимости полива
-  bool needsWatering(int moisture) {
-    return moisture >= dryThreshold;
+  for (int i = 0; i < pumpController.getPumpCount(); i++) {
+    Pump* p = pumpController.getPumpAt(i);
+    if (!p) continue;
+    int soilPin = p->getSensor().getSoilPin();
+    int threshold = p->getSensor().getDryThreshold();
+    unsigned long interval = p->getSensor().getCheckInterval();
+    f.print(F("TH_"));
+    f.print(sensorPin(soilPin));
+    f.print('=');
+    f.println(threshold);
+    f.print(F("IV_P"));
+    f.print(p->getPumpPin());
+    f.print('=');
+    f.println(interval);
   }
+  f.close();
+  logMessage(F("CFG saved"));
+}
 
-  // Метод для получения информации о датчике
-  String getInfo(int moisture, int getPumpPin) {
-    return String(millis() /1000) + " сек. - Датчик " + String(soilPin) + 
-           "(p="+ String(getPumpPin)+"): сухость=" + String(moisture) + 
-           "(" + String(dryThreshold) +
-           ")" + String(moisture - dryThreshold) +
-           " | " + globalProcessStats.getStatsString() +
-           " | RAM: " + String(getFreeMemory()) + " байт";
+// Загрузка конфигурации с SD
+void loadConfig() {
+  if (!SD.exists(CONFIG_FILE)) {
+    logMessage(F("CFG not found"));
+    return;
   }
-
-  // Геттеры
-  int getSoilPin() const { return soilPin; }
-  int getDryThreshold() const { return dryThreshold; }
-  unsigned long getCheckInterval() const { return checkInterval; }
-  unsigned long getLastCheckTime() const { return lastCheckTime; }
-  int getLastMoistureValue() const { return lastMoistureValue; } // Новый геттер
-};
-
-// Класс для управления насосом
-class Pump {
-private:
-  SoilSensor sensor;        // Объект датчика (копия)
-  int pumpPin;              // Пин реле насоса
-  unsigned long pumpDuration; // Длительность работы насоса
-  bool isPumping;           // Флаг активности насоса
-  unsigned long pumpStartTime; // Время начала работы насоса
-  unsigned long lastPumpOffTime;
-
-public:
-  // Конструктор принимает временный объект SoilSensor
-  Pump(SoilSensor sensor, int pumpPin, unsigned long pumpDuration)
-    : sensor(sensor), pumpPin(pumpPin), pumpDuration(pumpDuration),
-      isPumping(false), pumpStartTime(0), lastPumpOffTime(0) {}
-
-  // Метод для настройки пина насоса
-  void setupPin() {
-    pinMode(pumpPin, OUTPUT);
+  File f = SD.open(CONFIG_FILE, FILE_READ);
+  if (!f) {
+    logMessage(F("ERR: CFG open R"));
+    return;
   }
-
-  // Метод для проверки, истекло ли время работы насоса
-  bool isPumpTimeExpired() {
-    return millis() - pumpStartTime >= pumpDuration;
-  }
-
-  // Метод для включения насоса
-  void startPumping() {
-    digitalWrite(pumpPin, LOW);  // Инвертированная логика: LOW включает насос
-    isPumping = true;
-    pumpStartTime = millis();
-    Serial.println("Насос на пине " + String(pumpPin) + " включен s=" + String(getSensor().getSoilPin()) + "");
-  }
-
-  // Метод для выключения насоса
-  void stopPumping() {
-    digitalWrite(pumpPin, HIGH); // Инвертированная логика: HIGH выключает насос
-    isPumping = false;
-    Serial.println("Насос на пине " + String(pumpPin) + " выключен. Следующая проверка через "
-      + String(getSensor().getCheckInterval() / 1000)
-      + " сек. | Последняя сухость: " + String(getSensor().getLastMoistureValue())
-      + " | Порог сухости: " + String(getSensor().getDryThreshold())); 
-  }
-
-  // Основной метод обработки насоса
-  void process() {
-    unsigned long startTime = micros(); // Засекаем время начала
-    
-    // Проверяем, не активен ли насос в данный момент
-    if (isPumping) {
-      // Если насос работает, проверяем, не истекло ли время работы
-      if (isPumpTimeExpired()) {
-        stopPumping();
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+    int eq = line.indexOf('=');
+    if (eq < 0) continue;
+    String key = line.substring(0, eq);
+    String val = line.substring(eq + 1);
+    val.trim();
+    if (key.startsWith("TH_")) {
+      String pinStr = key.substring(3);
+      int soilPin = parseSoilPin(pinStr);
+      if (soilPin >= 0) {
+        pumpController.setThresholdForSoilPin(soilPin, val.toInt());
       }
-      
-      unsigned long endTime = micros(); // Засекаем время окончания
-      globalProcessStats.update(endTime - startTime); // Обновляем статистику
-      return; // Прерываем выполнение, если насос активен
-    }
-    
-    // Проверяем, пришло ли время для следующей проверки датчика
-    if (sensor.isCheckTime()) {
-      int moisture = sensor.readMoisture();
-      
-      // Выводим информацию в монитор порта
-      Serial.println(sensor.getInfo(moisture, getPumpPin()));
-
-      // Проверяем, слишком ли сухая почва
-      if (sensor.needsWatering(moisture)) {
-        startPumping();
+    } else if (key.startsWith("IV_P")) {
+      String pinStr = key.substring(4);
+      int pumpPin = pinStr.toInt();
+      if (!(pumpPin <= 0 && pinStr != "0")) {
+        pumpController.setIntervalForPumpPin(pumpPin, val.toInt());
       }
     }
-    
-    unsigned long endTime = micros(); // Засекаем время окончания
-    globalProcessStats.update(endTime - startTime); // Обновляем статистику
   }
-
-  // Геттеры
-  bool getIsPumping() const { return isPumping; }
-  unsigned long getPumpStartTime() const { return pumpStartTime; }
-  unsigned long getPumpDuration() const { return pumpDuration; }
-  SoilSensor getSensor() const { return sensor; }
-  int getPumpPin() const { return pumpPin; }
-  unsigned long getLastPumpOffTime() const { return lastPumpOffTime; } // Новый геттер
-};
-
-// Класс контроллера насосов
-class PumpController {
-private:
-  Pump** pumps;           // Массив указателей на насосы
-  int pumpCount;          // Количество насосов
-  int maxPumps;           // Максимальное количество насосов
-
-public:
-  // Конструктор
-  PumpController(int maxPumps = 10) : pumpCount(0), maxPumps(maxPumps) {
-    pumps = new Pump*[maxPumps];
-    for (int i = 0; i < maxPumps; i++) {
-      pumps[i] = nullptr;
-    }
-  }
-
-  // Деструктор для очистки памяти
-  ~PumpController() {
-    for (int i = 0; i < pumpCount; i++) {
-      delete pumps[i];
-    }
-    delete[] pumps;
-  }
-
-  // Метод для добавления насоса
-  bool addPump(SoilSensor sensor, int pumpPin, unsigned long pumpDuration) {
-    if (pumpCount >= maxPumps) {
-      Serial.println("Ошибка: достигнуто максимальное количество насосов");
-      return false;
-    }
-    
-    pumps[pumpCount] = new Pump(sensor, pumpPin, pumpDuration);
-    pumpCount++;
-    return true;
-  }
-
-  // Метод инициализации для раздела setup
-  void setup() {
-    for (int i = 0; i < pumpCount; i++) {
-      pumps[i]->setupPin();
-      pumps[i]->stopPumping();
-    }
-    Serial.println("Система автоматического полива инициализирована");
-    Serial.println("Количество насосов: " + String(pumpCount));
-    Serial.println("Свободная память: " + String(getFreeMemory()) + " байт");
-  }
-
-  // Метод process для loop
-  void process() {
-    for (int i = 0; i < pumpCount; i++) {
-      pumps[i]->process();
-    }
-  }
-
-  // Геттеры
-  int getPumpCount() const { return pumpCount; }
-  int getMaxPumps() const { return maxPumps; }
-};
+  f.close();
+  logMessage(F("CFG loaded"));
+}
 
 // Создание контроллера насосов
 PumpController pumpController(10); // Максимум 10 насосов
+
+// Буфер для команд из Serial
+String serialCmdBuffer;
+
+void processCommand(const String& cmd) {
+  String s = cmd;
+  s.trim();
+  if (s.length() == 0) return;
+
+  auto printUsage = []() {
+    logMessage(F("CMD: T <soil_pin> <threshold> (soil pin A0.. / 0..)") );
+    logMessage(F("CMD: I P<pump_pin> <interval_ms> (pump pin digital, format P4)") );
+  };
+
+  if (s.startsWith("T") || s.startsWith("t")) {
+    int sp1 = s.indexOf(' ');
+    if (sp1 < 0) {
+      printUsage();
+      return;
+    }
+    String rest = s.substring(sp1 + 1);
+    rest.trim();
+    int sp2 = rest.indexOf(' ');
+    if (sp2 < 0) {
+      printUsage();
+      return;
+    }
+    String pinTok = rest.substring(0, sp2);
+    String valTok = rest.substring(sp2 + 1);
+    pinTok.trim();
+    valTok.trim();
+    int soilPin = parseSoilPin(pinTok);
+    if (soilPin < 0) {
+      logMessage(F("ERR: bad pin"));
+      return;
+    }
+    int threshold = valTok.toInt();
+    pumpController.setThresholdForSoilPin(soilPin, threshold);
+    saveConfig();
+    return;
+  }
+
+  if (s.startsWith("I") || s.startsWith("i")) {
+    int sp1 = s.indexOf(' ');
+    if (sp1 < 0) {
+      printUsage();
+      return;
+    }
+    String rest = s.substring(sp1 + 1);
+    rest.trim();
+    int sp2 = rest.indexOf(' ');
+    if (sp2 < 0) {
+      printUsage();
+      return;
+    }
+    String pinTok = rest.substring(0, sp2);
+    String valTok = rest.substring(sp2 + 1);
+    pinTok.trim();
+    valTok.trim();
+    if (pinTok.length() > 0 && (pinTok[0] == 'P' || pinTok[0] == 'p')) {
+      pinTok = pinTok.substring(1);
+      pinTok.trim();
+    }
+    int pumpPin = pinTok.toInt();
+    if (pumpPin <= 0 && pinTok != "0") {
+      logMessage(F("ERR: bad pump pin"));
+      return;
+    }
+    unsigned long interval = valTok.toInt();
+    if (interval == 0) {
+      logMessage(F("ERR: interval must be > 0"));
+      return;
+    }
+    pumpController.setIntervalForPumpPin(pumpPin, interval);
+    saveConfig();
+    return;
+  }
+
+  logMessage(F("ERR: unknown cmd"));
+}
+
+void handleSerialInput() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    Serial.print(c); // Эхо введённого символа
+    if (c == '\n' || c == '\r') {
+      if (serialCmdBuffer.length() > 0) {
+        processCommand(serialCmdBuffer);
+        serialCmdBuffer = "";
+        Serial.println(); // Новая строка после ответа
+      }
+    } else {
+      if (serialCmdBuffer.length() < 64) {
+        serialCmdBuffer += c;
+      } else {
+        serialCmdBuffer = ""; // сбрасываем при переполнении
+      }
+    }
+  }
+}
 
 void setup() {
   // Инициализация последовательного порта
   Serial.begin(BAUD_RATE);
   
+  // Инициализация SD-карты для логирования
+  logger.begin(SD_CS_PIN);
+  
   // Добавление насосов в контроллер
-  pumpController.addPump(SoilSensor(A0, 400, 44000), 4, 44000);  // Насос 1
-  pumpController.addPump(SoilSensor(A1, 7, 15000), 5, 25000);   // Насос 2
-  pumpController.addPump(SoilSensor(A2, 250, 666000), 6, 66000);  // Насос 3
-  pumpController.addPump(SoilSensor(A3, 3000, 7777000), 7 , 77000);  // Насос 4
+  pumpController.addPump(SoilSensor(A1, 200, 44400), 4, 4000);  // Насос 1
+  pumpController.addPump(SoilSensor(A3, 300, 55000), 5, 5000);   // Насос 2
+  pumpController.addPump(SoilSensor(A2, 222, 66000), 6, 6000);  // Насос 3
+  pumpController.addPump(SoilSensor(A0, 223, 77000), 7 , 7000);  // Насос 4
+
+  // Загрузка конфигурации после регистрации насосов
+  loadConfig();
   
   // Инициализация контроллера
   pumpController.setup();
 }
 
 void loop() {
+  handleSerialInput();
   // Обработка всех насосов через контроллер
   pumpController.process();
 }
