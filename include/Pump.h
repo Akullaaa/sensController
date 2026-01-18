@@ -53,6 +53,8 @@ public:
   void stopPumping() {
     digitalWrite(pumpPin, HIGH);
     isPumping = false;
+    // Обновляем время последней проверки датчика для отсчета интервала с момента остановки насоса
+    sensor.setLastCheckTime();
     unsigned long workTime = millis() - pumpStartTime;
     String msg = String(F("Pump ")) + pumpPin + F(" OFF t=") + (workTime / 1000) + F("s");
     logMessage(msg);

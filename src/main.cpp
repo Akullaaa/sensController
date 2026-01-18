@@ -234,10 +234,10 @@ void setup() {
   logger.begin(SD_CS_PIN);
   
   // Добавление насосов в контроллер
-  pumpController.addPump(SoilSensor(A1, 200, 44400), 4, 4000);  // Насос 1
-  pumpController.addPump(SoilSensor(A3, 300, 55000), 5, 5000);   // Насос 2
-  pumpController.addPump(SoilSensor(A2, 222, 66000), 6, 6000);  // Насос 3
-  pumpController.addPump(SoilSensor(A0, 223, 77000), 7 , 7000);  // Насос 4
+  pumpController.addPump(SoilSensor(A1, 600, 44400), 4, 4000);  // Насос 1
+  pumpController.addPump(SoilSensor(A3, 220, 15000), 5, 5000);   // Насос 2
+  pumpController.addPump(SoilSensor(A2, 222, 16000), 6, 6000);  // Насос 3
+  pumpController.addPump(SoilSensor(A0, 223, 17000), 7 , 7000);  // Насос 4
 
   // Загрузка конфигурации после регистрации насосов
   loadConfig();

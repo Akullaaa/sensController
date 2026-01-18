@@ -47,6 +47,11 @@ public:
     checkInterval = interval;
   }
 
+  // Обновление времени последней проверки текущим временем (используется при остановке насоса)
+  void setLastCheckTime() {
+    lastCheckTime = millis();
+  }
+
   // Метод для получения оставшегося времени до следующей проверки в секундах
   unsigned long getSecondsUntilNextCheck() const {
     unsigned long elapsed = millis() - lastCheckTime;
